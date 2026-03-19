@@ -100,7 +100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady from ex
 
     required_scopes = api.get_api_scopes(entry.data["auth_implementation"])
-    if not (set(session.token["scope"]) & set(required_scopes)):
+    if set(session.token["scope"]) - set(required_scopes):
         _LOGGER.warning(
             "Session is missing scopes: %s",
             set(required_scopes) - set(session.token["scope"]),
