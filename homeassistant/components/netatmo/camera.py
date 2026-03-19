@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, cast
 
 import aiohttp
-from pyatmo import ApiError as NetatmoApiError, modules as NaModules
+from pyatmo import ApiError as NetatmoApiError, WebRTCStream, modules as NaModules
 from pyatmo.event import Event as NaEvent
 import voluptuous as vol
+from webrtc_models import RTCIceCandidateInit
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera.webrtc import WebRTCAnswer, WebRTCSendMessage
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -120,6 +123,85 @@ class NetatmoCamera(NetatmoModuleEntity, Camera):
                 },
             ]
         )
+
+        self._webrtc_streams: dict[str, WebRTCStream] = {}
+
+    # FIXME: Implementing this method here breaks Netatmo HLS cameras since HA will assume
+    #        NetatmoCamera supports WebRTC and attempt to use WebRTC for HLS cameras.
+    async def async_handle_async_webrtc_offer(
+        self, offer_sdp: str, session_id: str, send_message: WebRTCSendMessage
+    ) -> None:
+        """Handle the async WebRTC offer.
+
+        Async means that it could take some time to process the offer and responses/message
+        will be sent with the send_message callback.
+        This method is used by cameras with CameraEntityFeature.STREAM.
+        An integration overriding this method must also implement async_on_webrtc_candidate.
+
+        Integrations can override with a native WebRTC implementation.
+        """
+
+        # Wait for candidates to be gathered (non-trickle ICE)
+        self._ice_candidates = []
+        await asyncio.sleep(1)  # FIXME: Find a better way
+
+        # Add the candidates to the offer
+        # Each candidate must be added in the proper section
+        candidate_by_media = {}
+
+        for candidate in self._ice_candidates:
+            if candidate.sdp_m_line_index not in candidate_by_media:
+                candidate_by_media[candidate.sdp_m_line_index] = []
+
+            candidate_by_media[candidate.sdp_m_line_index].append(candidate)
+
+        max_mline = max(candidate_by_media.keys(), default=0)
+
+        for mline in range(max_mline + 1):
+            candidates = candidate_by_media.get(mline, [])
+            candidates_lines = "".join(
+                f"a={candidate.candidate}\r\n" for candidate in candidates
+            )
+            candidates_lines += "a=end-of-candidates\r\n"
+
+            offer_sdp = offer_sdp.replace(
+                "a=ice-options:trickle\r\n", candidates_lines, 1
+            )
+
+        # Send the offer and wait for the answer
+        try:
+            answer = await self.device.async_start_stream(session_id, offer_sdp)
+        except NetatmoApiError as err:
+            raise HomeAssistantError(f"{err}") from err
+
+        send_message(WebRTCAnswer(answer.sdp))
+
+        self._webrtc_streams[session_id] = answer.stream
+
+    async def async_on_webrtc_candidate(
+        self, session_id: str, candidate: RTCIceCandidateInit
+    ) -> None:
+        """Handle a WebRTC candidate."""
+        self._ice_candidates.append(candidate)
+
+    @callback
+    def close_webrtc_session(self, session_id: str) -> None:
+        """Close a WebRTC session."""
+        if (stream := self._webrtc_streams.pop(session_id, None)) is not None:
+
+            async def close_stream() -> None:
+                await self.device.async_stop_stream(stream)
+
+            self.hass.async_create_task(close_stream())
+
+        super().close_webrtc_session(session_id)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity will be removed from hass."""
+        await super().async_will_remove_from_hass()
+
+        for session_id in list(self._webrtc_streams.keys()):
+            self.close_webrtc_session(session_id)
 
     async def async_added_to_hass(self) -> None:
         """Entity created."""
