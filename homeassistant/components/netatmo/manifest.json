@@ -12,5 +12,7 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "loggers": ["pyatmo"],
-  "requirements": ["pyatmo==9.2.3"]
+  "requirements": [
+    "pyatmo @ git+https://github.com/taltenbach/pyatmo.git@feature/npc_stream_support_test"
+  ]
 }
